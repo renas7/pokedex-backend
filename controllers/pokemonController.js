@@ -189,7 +189,6 @@ exports.getPokemonById = (req, res) => {
         FROM pokemon_evolutions e
         JOIN pokemon p_from ON e.from_pokemon_id = p_from.id
         JOIN pokemon p_to ON e.to_pokemon_id = p_to.id
-        WHERE e.from_pokemon_id = ? OR e.to_pokemon_id = ?
       `;
       db.query(evoQuery, [id, id], (err, evolutions) => {
         if (err) {
@@ -219,4 +218,33 @@ exports.getPokemonById = (req, res) => {
       });
     });
   });
+};
+
+
+exports.getAllTypes = (req, res) => {
+  db.query('SELECT id, name FROM types', (err, results) => {
+    if (err) return res.status(500).json({ error: 'Database error' });
+    res.json(results);
+  });
+};
+
+exports.addPokemon = (req, res) => {
+  const { name, number, species, height, weight, type_ids } = req.body;
+
+  db.query(
+    'INSERT INTO pokemon (name, number, species, height, weight) VALUES (?, ?, ?, ?, ?)',
+    [name, number, species, height, weight],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: 'Insert error' });
+
+      const pokemonId = result.insertId;
+      if (!type_ids?.length) return res.json({ success: true });
+
+      const typeValues = type_ids.map(id => [pokemonId, id]);
+      db.query('INSERT INTO pokemon_types (pokemon_id, type_id) VALUES ?', [typeValues], (err) => {
+        if (err) return res.status(500).json({ error: 'Type insert error' });
+        res.json({ success: true });
+      });
+    }
+  );
 };
