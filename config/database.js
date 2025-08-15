@@ -26,9 +26,6 @@
 
 
 // module.exports = pool;
-
-const mysql = require('mysql2'); // <-- NOT 'mysql2/promise'
-
 // const db = mysql.createPool({
 //   host: process.env.DB_HOST || 'localhost',
 //   user: process.env.DB_USER || 'root',
@@ -38,6 +35,9 @@ const mysql = require('mysql2'); // <-- NOT 'mysql2/promise'
 //   connectionLimit: 10,
 //   queueLimit: 0
 // });
+
+const mysql = require('mysql2'); // <-- NOT 'mysql2/promise'
+
 
 const db = mysql.createConnection({
   host: 'localhost',

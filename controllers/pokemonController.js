@@ -56,7 +56,7 @@ exports.getAllPokemon = (req, res) => {
       GROUP BY p2.id
     ) AS pt ON p.id = pt.pokemon_id
     LEFT JOIN pokemon_descriptions d ON p.id = d.pokemon_id
-    GROUP BY p.id
+    GROUP BY p.number
   `;
 
   db.query(mainQuery, (err, results) => {
