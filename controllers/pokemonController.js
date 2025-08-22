@@ -34,6 +34,11 @@
 
 const db = require('../config/database');
 
+// tiny helper so JSON strings from DB don't crash the server
+function parseJSON(str, fallback) {
+  try { return str ? JSON.parse(str) : fallback; } catch { return fallback; }
+}
+
 // GET /pokemon
 exports.getAllPokemon = (req, res) => {
   const mainQuery = `
@@ -137,7 +142,8 @@ exports.getPokemonById = (req, res) => {
       p.base_experience, p.capture_rate, p.hatch_time, p.base_friendship,
       p.gender_male, p.gender_female,
       pt.types,
-      JSON_ARRAYAGG(JSON_OBJECT('game', d.game_version, 'text', d.description)) AS descriptions
+      JSON_ARRAYAGG(JSON_OBJECT('game', d.game_version, 'text', d.description)) AS descriptions,
+      s.hp, s.attack, s.defense, s.sp_atk, s.sp_def, s.speed
     FROM pokemon p
     LEFT JOIN (
       SELECT p2.id AS pokemon_id, JSON_ARRAYAGG(t.name) AS types
@@ -147,6 +153,7 @@ exports.getPokemonById = (req, res) => {
       GROUP BY p2.id
     ) AS pt ON p.id = pt.pokemon_id
     LEFT JOIN pokemon_descriptions d ON p.id = d.pokemon_id
+    LEFT JOIN pokemon_stats s ON s.pokemon_id = p.id
     WHERE p.id = ?
     GROUP BY p.id
   `;
@@ -162,6 +169,19 @@ exports.getPokemonById = (req, res) => {
     }
 
     const pokemon = results[0];
+
+    if (pokemon.hp != null) {
+      pokemon.stats = {
+        hp: Number(pokemon.hp),
+        attack: Number(pokemon.attack),
+        defense: Number(pokemon.defense),
+        sp_atk: Number(pokemon.sp_atk),
+        sp_def: Number(pokemon.sp_def),
+        speed: Number(pokemon.speed),
+      };
+      delete pokemon.hp; delete pokemon.attack; delete pokemon.defense;
+      delete pokemon.sp_atk; delete pokemon.sp_def; delete pokemon.speed;
+    }
 
     // Fetch abilities
     const abilitiesQuery = `
@@ -180,15 +200,29 @@ exports.getPokemonById = (req, res) => {
 
       // Fetch evolutions
       const evoQuery = `
-        SELECT e.from_pokemon_id,
-              p_from.name AS from_pokemon_name,
-              e.to_pokemon_id,
-              p_to.name AS to_pokemon_name,
-              e.method,
-              e.level
+        WITH RECURSIVE chain(id) AS (
+          SELECT ?                               -- start from current Pokémon
+          UNION DISTINCT
+          SELECT e.from_pokemon_id               -- walk backwards (pre-evos)
+          FROM pokemon_evolutions e
+          JOIN chain c ON e.to_pokemon_id = c.id
+          UNION DISTINCT
+          SELECT e.to_pokemon_id                 -- walk forwards (post-evos)
+          FROM pokemon_evolutions e
+          JOIN chain c ON e.from_pokemon_id = c.id
+        )
+        SELECT DISTINCT
+          e.from_pokemon_id,
+          p_from.name AS from_pokemon_name,
+          e.to_pokemon_id,
+          p_to.name   AS to_pokemon_name,
+          e.method,
+          e.level
         FROM pokemon_evolutions e
-        JOIN pokemon p_from ON e.from_pokemon_id = p_from.id
-        JOIN pokemon p_to ON e.to_pokemon_id = p_to.id
+        JOIN chain c ON (e.from_pokemon_id = c.id OR e.to_pokemon_id = c.id)
+        JOIN pokemon p_from ON p_from.id = e.from_pokemon_id
+        JOIN pokemon p_to   ON p_to.id   = e.to_pokemon_id
+        ORDER BY e.from_pokemon_id, e.to_pokemon_id;
       `;
       db.query(evoQuery, [id, id], (err, evolutions) => {
         if (err) {
