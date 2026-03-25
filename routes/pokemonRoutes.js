@@ -11,5 +11,9 @@ router.get('/egg-groups', pokemonController.getAllEggGroups);
 
 // POST create:
 router.post('/pokemon', pokemonController.createPokemon);
+router.post('/pokemon/:number/types', pokemonController.setTypesByNumber);
+
+// Edit
+router.put('/pokemon/:id', pokemonController.updatePokemon);
 
 module.exports = router;

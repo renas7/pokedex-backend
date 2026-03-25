@@ -152,6 +152,33 @@ exports.getAllPokemon = (req, res) => {
   });
 };
 
+exports.setTypesByNumber = (req,res)=>{
+  const num = Number(req.params.number);
+  const { type1_id, type2_id } = req.body;
+  db.query('SELECT id FROM pokemon WHERE number=? LIMIT 1',[num], (e,rows)=>{
+    if(e) return res.status(500).json({error:'db error'});
+    if(!rows.length) return res.status(404).json({error:'not found'});
+    const pid = rows[0].id;
+    db.beginTransaction(err=>{
+      if(err) return res.status(500).json({error:'tx fail'});
+      const doErr = (err)=>db.rollback(()=>res.status(400).json({error:err.message||'fail'}));
+      db.query('DELETE FROM pokemon_types WHERE pokemon_id=?',[pid], (e1)=>{
+        if(e1) return doErr(e1);
+        const vals = [[pid, Number(type1_id), 1]];
+        if (type2_id && Number(type2_id)!==Number(type1_id)) vals.push([pid, Number(type2_id), 2]);
+        db.query('INSERT INTO pokemon_types (pokemon_id,type_id,slot) VALUES ?',[vals], (e2)=>{
+          if(e2) return doErr(e2);
+          db.commit(e3=>{
+            if(e3) return doErr(e3);
+            res.json({ok:true});
+          });
+        });
+      });
+    });
+  });
+};
+
+
 
 exports.getPokemonById = (req, res) => {
   const id = Number(req.params.id);
@@ -287,6 +314,171 @@ exports.getPokemonById = (req, res) => {
   });
 };
 
+exports.updatePokemon = (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: 'Invalid Pokémon id' });
+  }
+
+  const {
+    name,
+    number,
+    species,
+    height,
+    weight,
+    generation,
+    base_experience,
+    capture_rate,
+    hatch_time,
+    base_friendship,
+    gender_male,
+    gender_female,
+
+    type_ids,          // [type1, type2?] legacy
+    abilities,         // 
+    hidden_ability_id,
+    egg_group_ids,     // array (we’ll cap to 2)
+    stats,             // { hp, attack, ... }
+    descriptions,      // [{game,text}]
+    evolutions,        // [{to_pokemon_id, method, level}]
+    forms              // [{form_name, form_type}]
+  } = req.body;
+
+  db.beginTransaction(err => {
+    if (err) return res.status(500).json({ error: 'Transaction start failed' });
+
+    const fail = (e) => db.rollback(() => {
+      console.error('updatePokemon error:', e);
+      res.status(400).json({ error: e.message || 'Update failed' });
+    });
+
+    // 1) core row
+    db.query(
+      `UPDATE pokemon SET
+          name=?, number=?, species=?, height=?, weight=?, generation=?,
+          base_experience=?, capture_rate=?, hatch_time=?, base_friendship=?,
+          gender_male=?, gender_female=?
+        WHERE id=?`,
+      [name, number, species, height, weight, generation,
+       base_experience, capture_rate, hatch_time, base_friendship,
+       gender_male, gender_female, id],
+      (e1) => {
+        if (e1) return fail(e1);
+
+        // 2) TYPES: replace with slots 1/2
+        db.query('DELETE FROM pokemon_types WHERE pokemon_id=?', [id], (e2) => {
+          if (e2) return fail(e2);
+
+          const ids = Array.isArray(type_ids) ? type_ids.map(Number).filter(Boolean) : [];
+          const t1 = ids[0] ?? null;
+          const t2 = ids[1] ?? null;
+          const typeVals = [];
+          if (t1) typeVals.push([id, t1, 1]);
+          if (t2 && t2 !== t1) typeVals.push([id, t2, 2]);
+
+          const insertTypes = (next) => {
+            if (!typeVals.length) return next();
+            db.query('INSERT INTO pokemon_types (pokemon_id, type_id, slot) VALUES ?', [typeVals], (e) => e ? fail(e) : next());
+          };
+
+          insertTypes(() => {
+            // 3) ABILITIES: replace
+            db.query('DELETE FROM pokemon_abilities WHERE pokemon_id=?', [id], (e3) => {
+              if (e3) return fail(e3);
+              const abil = Array.isArray(abilities) ? abilities.map(Number).filter(Boolean) : [];
+              const hiddenId = hidden_ability_id ? Number(hidden_ability_id) : null;
+
+              const vals = [
+                ...abil.map(aid => [id, aid, 0]),
+                ...(hiddenId && !abil.includes(hiddenId) ? [[id, hiddenId, 1]] : [])
+              ];
+
+              if (!vals.length) return afterAbilities();
+
+              db.query(
+                'INSERT INTO pokemon_abilities (pokemon_id, ability_id, is_hidden) VALUES ?',
+                [vals],
+                (e4) => e4 ? fail(e4) : afterAbilities()
+              );
+            });
+
+            function afterAbilities() {
+              // 4) EGG GROUPS: replace, cap 2
+              db.query('DELETE FROM pokemon_egg_groups WHERE pokemon_id=?', [id], (e5) => {
+                if (e5) return fail(e5);
+                const eggs = (Array.isArray(egg_group_ids) ? egg_group_ids : []).map(Number).filter(Boolean).slice(0, 2);
+                if (!eggs.length) return afterEggs();
+                const vals = eggs.map(eg => [id, eg]);
+                db.query('INSERT INTO pokemon_egg_groups (pokemon_id, egg_group_id) VALUES ?', [vals], (e6) => e6 ? fail(e6) : afterEggs());
+              });
+
+              function afterEggs() {
+                // 5) STATS: upsert (replace row)
+                db.query('DELETE FROM pokemon_stats WHERE pokemon_id=?', [id], (e7) => {
+                  if (e7) return fail(e7);
+                  if (!stats || typeof stats !== 'object') return afterStats();
+                  db.query(
+                    `INSERT INTO pokemon_stats (pokemon_id, hp, attack, defense, sp_atk, sp_def, speed)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                    [id, stats.hp || null, stats.attack || null, stats.defense || null,
+                         stats.sp_atk || null, stats.sp_def || null, stats.speed || null],
+                    (e8) => e8 ? fail(e8) : afterStats()
+                  );
+                });
+
+                function afterStats() {
+                  // 6) DESCRIPTIONS: replace
+                  db.query('DELETE FROM pokemon_descriptions WHERE pokemon_id=?', [id], (e9) => {
+                    if (e9) return fail(e9);
+                    const desc = (Array.isArray(descriptions) ? descriptions : []).filter(d => d && (d.game || d.text));
+                    if (!desc.length) return afterDescs();
+                    const vals = desc.map(d => [id, d.game || '', d.text || '']);
+                    db.query('INSERT INTO pokemon_descriptions (pokemon_id, game_version, description) VALUES ?', [vals], (e10) => e10 ? fail(e10) : afterDescs());
+                  });
+
+                  function afterDescs() {
+                    // 7) EVOLUTIONS: replace forward edges
+                    db.query('DELETE FROM pokemon_evolutions WHERE from_pokemon_id=?', [id], (e11) => {
+                      if (e11) return fail(e11);
+                      const ev = (Array.isArray(evolutions) ? evolutions : [])
+                        .map(e => ({
+                          to_id: e.to_pokemon_id ? Number(e.to_pokemon_id) : null,
+                          method: e.method || 'Level Up',
+                          level: e.level ?? null
+                        }))
+                        .filter(e => e.to_id && e.to_id !== id); // prevent self-evolution
+                      if (!ev.length) return afterEvos();
+                      const vals = ev.map(e => [id, e.to_id, e.method, e.level]);
+                      db.query('INSERT INTO pokemon_evolutions (from_pokemon_id, to_pokemon_id, method, level) VALUES ?', [vals], (e12) => e12 ? fail(e12) : afterEvos());
+                    });
+
+                    function afterEvos() {
+                      // 8) FORMS: replace (optional)
+                      db.query('DELETE FROM pokemon_forms WHERE pokemon_id=?', [id], (e13) => {
+                        if (e13) return fail(e13);
+                        const f = (Array.isArray(forms) ? forms : []).filter(x => x && (x.form_name || x.form_type));
+                        if (!f.length) return commit();
+                        const vals = f.map(x => [id, x.form_name || '', x.form_type || '']);
+                        db.query('INSERT INTO pokemon_forms (pokemon_id, form_name, form_type) VALUES ?', [vals], (e14) => e14 ? fail(e14) : commit());
+                      });
+
+                      function commit() {
+                        db.commit(errCommit => {
+                          if (errCommit) return fail(errCommit);
+                          res.json({ ok: true, id });
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          });
+        });
+      }
+    );
+  });
+};
 
 
 exports.getAllTypes = (req, res) => {
@@ -313,6 +505,7 @@ exports.createPokemon = (req, res) => {
     gender_female,
     type_ids,
     abilities,
+    hidden_ability_id,
     egg_group_ids,
     stats,
     descriptions,
